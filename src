@@ -1,1 +1,284 @@
+#!/usr/bin/env python3
+"""
+Basic Trace Route Monitor - Optimized for DevAsc VM
+"""
 
+import subprocess
+import re
+import time
+import sys
+from datetime import datetime
+
+class TraceMonitorDevAsc:
+    def __init__(self):
+        self.results = {
+            'hops': [],
+            'total_hops': 0,
+            'timeouts': 0,
+            'successful_hops': 0
+        }
+
+    def get_valid_input(self):
+        print("🛣️  Trace Route Monitor - DevAsc VM")
+        print("=" * 45)
+        
+        target_host = input("Enter target host (default: 8.8.8.8): ").strip()
+        if not target_host:
+            target_host = "8.8.8.8"
+        
+        while True:
+            max_hops_input = input("Enter max hops (default: 10): ").strip()
+            if not max_hops_input:
+                max_hops = 10
+                break
+            try:
+                max_hops = int(max_hops_input)
+                if max_hops <= 0 or max_hops > 20:
+                    print("❌ Please enter between 1-20 hops!")
+                    continue
+                break
+            except ValueError:
+                print("❌ Invalid input! Please enter a number")
+        
+        return target_host, max_hops
+
+    def execute_traceroute(self, host, max_hops):
+        """Execute traceroute with DevAsc-compatible options"""
+        try:
+            print(f"\n🎯 Tracing route to {host} (max {max_hops} hops)")
+            print("=" * 50)
+            
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"🕐 Started at: {timestamp}")
+            print("-" * 50)
+            
+            # Use simpler traceroute command for DevAsc
+            result = subprocess.run(
+                ['traceroute', '-m', str(max_hops), '-w', '1', '-q', '1', host],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            print("📋 Raw traceroute output:")
+            print("-" * 40)
+            print(result.stdout)
+            print("-" * 40)
+            
+            if result.returncode == 0:
+                return self.parse_traceroute_output_devasc(result.stdout, host)
+            else:
+                print(f"❌ Traceroute failed with return code: {result.returncode}")
+                if result.stderr:
+                    print(f"Error: {result.stderr}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            print("⏰ Traceroute timeout")
+            return None
+        except FileNotFoundError:
+            print("❌ Traceroute command not found")
+            return None
+        except Exception as e:
+            print(f"💥 Error during traceroute: {e}")
+            return None
+
+    def parse_traceroute_output_devasc(self, output, target_host):
+        """Parse traceroute output specifically for DevAsc VM format"""
+        hops = []
+        lines = output.strip().split('\n')
+        
+        print(f"\n🔍 Analyzing {len(lines)} lines of output...")
+        
+        hop_pattern = r'^\s*(\d+)\s+([\w\.\-*]+)\s+([\d\.]+)\s*ms\s*$'
+        
+        for line_num, line in enumerate(lines):
+            line = line.strip()
+            print(f"Line {line_num}: '{line}'")  # Debug output
+            
+            # Skip header line
+            if line.startswith('traceroute to'):
+                print("📝 Header line skipped")
+                continue
+            
+            # Parse hop line - DevAsc format: "1   10.0.2.2  0.322ms"
+            hop_data = self.parse_hop_line_devasc(line)
+            if hop_data:
+                hops.append(hop_data)
+                self.display_hop_info(hop_data)
+            else:
+                print(f"⚠️  Could not parse: {line}")
+        
+        print(f"✅ Successfully parsed {len(hops)} hops")
+        return hops
+
+    def parse_hop_line_devasc(self, line):
+        """Parse hop line in DevAsc VM format"""
+        # DevAsc format: "1   10.0.2.2  0.322ms"
+        # Or: "2   10.0.2.2  0.792ms"
+        
+        # Remove multiple spaces and clean the line
+        line = re.sub(r'\s+', ' ', line.strip())
+        
+        # Pattern for: "1 10.0.2.2 0.322ms"
+        pattern1 = r'^\s*(\d+)\s+([\w\.\-*]+)\s+([\d\.]+)\s*ms\s*$'
+        
+        # Pattern for: "1 192.168.1.1 (192.168.1.1) 1.234 ms"
+        pattern2 = r'^\s*(\d+)\s+([\w\.\-*]+)\s+\(([\d\.]+)\)\s+([\d\.]+)\s*ms\s*$'
+        
+        # Pattern for timeout: "3 * * *"
+        pattern3 = r'^\s*(\d+)\s+(\*)\s+(\*.*)$'
+        
+        for pattern in [pattern1, pattern2, pattern3]:
+            match = re.match(pattern, line)
+            if match:
+                hop_number = int(match.group(1))
+                
+                if pattern == pattern3:  # Timeout
+                    return {
+                        'hop_number': hop_number,
+                        'host': '*** Timeout ***',
+                        'ip': '*',
+                        'response_times': [],
+                        'avg_time': 0,
+                        'min_time': 0,
+                        'max_time': 0,
+                        'packet_loss': 100,
+                        'reached_destination': False
+                    }
+                
+                # Extract host and IP based on pattern
+                if pattern == pattern1:
+                    host = match.group(2)
+                    ip = match.group(2)  # Same as host in this format
+                    time_str = match.group(3)
+                else:  # pattern2
+                    host = match.group(2)
+                    ip = match.group(3)
+                    time_str = match.group(4)
+                
+                # Parse time
+                try:
+                    response_time = float(time_str)
+                    times = [response_time]
+                except ValueError:
+                    times = []
+                
+                # Determine if destination reached (simplified logic)
+                reached_destination = '*' not in host and times
+                
+                hop_info = {
+                    'hop_number': hop_number,
+                    'host': host,
+                    'ip': ip,
+                    'response_times': times,
+                    'avg_time': times[0] if times else 0,
+                    'min_time': times[0] if times else 0,
+                    'max_time': times[0] if times else 0,
+                    'packet_loss': 0 if times else 100,
+                    'reached_destination': reached_destination
+                }
+                
+                return hop_info
+        
+        return None
+
+    def display_hop_info(self, hop_data):
+        """Display information for a single hop"""
+        hop_num = hop_data['hop_number']
+        host = hop_data['host'][:20]  # Truncate long hostnames
+        ip = hop_data['ip'][:15] if hop_data['ip'] != host else ""
+        
+        display_host = f"{host} ({ip})" if ip and ip != host else host
+        
+        if hop_data['response_times']:
+            quality = self.get_hop_quality(hop_data['avg_time'], hop_data['packet_loss'])
+            time_str = f"{hop_data['avg_time']:6.1f}ms"
+            print(f"{hop_num:2d}. {display_host:<35} {time_str} {quality}")
+        else:
+            print(f"{hop_num:2d}. {display_host:<35} {'*** timeout ***':<10} 🔴 TIMEOUT")
+
+    def get_hop_quality(self, avg_time, packet_loss):
+        """Determine quality of hop based on response time and packet loss"""
+        if packet_loss == 100:
+            return "🔴 DEAD"
+        elif packet_loss > 50:
+            return "🟠 UNSTABLE"
+        elif avg_time < 1:
+            return "💚 EXCELLENT"
+        elif avg_time < 10:
+            return "💛 GOOD"
+        elif avg_time < 50:
+            return "🟡 FAIR"
+        elif avg_time < 100:
+            return "🟠 POOR"
+        else:
+            return "🔴 VERY POOR"
+
+    def display_statistics(self, hops, target_host):
+        """Display comprehensive statistics"""
+        if not hops:
+            print("\n❌ No hops recorded. This could be because:")
+            print("   • The target is in the same network")
+            print("   • Traceroute is being blocked")
+            print("   • Network configuration limits tracing")
+            print("\n💡 Try these targets instead:")
+            print("   • 8.8.8.8 (Google DNS)")
+            print("   • 1.1.1.1 (Cloudflare DNS)")
+            print("   • github.com")
+            return
+        
+        successful_hops = [h for h in hops if h['response_times']]
+        timeout_hops = [h for h in hops if not h['response_times']]
+        
+        print("\n" + "=" * 60)
+        print("📊 TRACE ROUTE STATISTICS")
+        print("=" * 60)
+        
+        print(f"🌐 Target Host: {target_host}")
+        print(f"🛣️  Total Hops Discovered: {len(hops)}")
+        print(f"✅ Successful Hops: {len(successful_hops)}")
+        print(f"❌ Timeout Hops: {len(timeout_hops)}")
+        
+        if successful_hops:
+            avg_times = [h['avg_time'] for h in successful_hops]
+            total_time = sum(avg_times)
+            
+            print(f"⏱️  Total Route Time: {total_time:.2f} ms")
+            print(f"📈 Average Hop Time: {sum(avg_times)/len(avg_times):.2f} ms")
+            
+            # Find fastest and slowest hops
+            fastest_hop = min(successful_hops, key=lambda x: x['avg_time'])
+            slowest_hop = max(successful_hops, key=lambda x: x['avg_time'])
+            
+            print(f"⚡ Fastest Hop: {fastest_hop['hop_number']} - {fastest_hop['avg_time']:.2f} ms")
+            print(f"🐌 Slowest Hop: {slowest_hop['hop_number']} - {slowest_hop['avg_time']:.2f} ms")
+            
+            # Network analysis
+            if len(successful_hops) == 1:
+                print("🔍 Analysis: Target is in local network")
+            elif total_time < 10:
+                print("🔍 Analysis: Excellent local network performance")
+            elif total_time < 50:
+                print("🔍 Analysis: Good network performance")
+            else:
+                print("🔍 Analysis: Higher latency detected")
+
+    def run(self):
+        """Main execution method"""
+        try:
+            target_host, max_hops = self.get_valid_input()
+            hops = self.execute_traceroute(target_host, max_hops)
+            self.display_statistics(hops, target_host)
+                
+        except KeyboardInterrupt:
+            print("\n\n⏹️  Trace route stopped by user")
+        except Exception as e:
+            print(f"\n❌ Unexpected error: {e}")
+
+def main():
+    monitor = TraceMonitorDevAsc()
+    monitor.run()
+
+if __name__ == "__main__":
+    main()
